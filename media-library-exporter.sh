@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script metadata
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 readonly SCRIPT_NAME=$(basename "$0")
 readonly SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 readonly TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -736,7 +736,7 @@ main() {
             title=$(echo "$line" | grep -o 'title="[^"]*"' | cut -d'"' -f2)
             key=$(echo "$line" | grep -o 'key="[^"]*"' | cut -d'"' -f2)
             if [[ -n "$title" && -n "$key" ]]; then
-                output_file="exports/${title// /_}.csv"
+                output_file="exports/${title// /-}.csv"
                 export_library "$key" "$output_file"
             fi
         done
