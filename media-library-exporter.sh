@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script metadata
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly SCRIPT_NAME=$(basename "$0")
 readonly SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 readonly TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -227,29 +227,30 @@ remove_lock() {
 # HTML entity decoder
 decode_html() {
     local text="$1"
-    local entities=(
-        's/&amp;/\&/g'
-        's/&#39;/'"'"'/g'
-        's/&quot;/"/g'
-        's/&lt;/</g'
-        's/&gt;/>/g'
-        's/&#8216;/'"'"'/g'
-        's/&#8217;/'"'"'/g'
-        's/&#8220;/"/g'
-        's/&#8221;/"/g'
-        's/&#8230;/.../g'
-        's/&ndash;/-/g'
-        's/&mdash;/--/g'
-        's/&nbsp;/ /g'
-        's/&rsquo;/'"'"'/g'
-        's/&lsquo;/'"'"'/g'
-        's/&rdquo;/"/g'
-        's/&ldquo;/"/g'
-        's/&#8211;/-/g'
-        's/&#8212;/--/g'
-        's/&#x27;/'"'"'/g'
-        's/&#179;/³/g'
-    )
+	local entities=(
+		's/&amp;/\&/g'
+		's/&#39;/'"'"'/g'
+		's/&quot;/"/g'
+		's/&lt;/</g'
+		's/&gt;/>/g'
+		's/&#8216;/'"'"'/g'
+		's/&#8217;/'"'"'/g'
+		's/&#8220;/"/g'
+		's/&#8221;/"/g'
+		's/&#8230;/.../g'
+		's/&ndash;/-/g'
+		's/&mdash;/--/g'
+		's/&nbsp;/ /g'
+		's/&rsquo;/'"'"'/g'
+		's/&lsquo;/'"'"'/g'
+		's/&rdquo;/"/g'
+		's/&ldquo;/"/g'
+		's/&#8211;/-/g'
+		's/&#8212;/--/g'
+		's/&#x27;/'"'"'/g'
+		's/&#179;/³/g'
+		's/&#189;/½/g'
+	)
     
     for entity in "${entities[@]}"; do
         text=$(echo "$text" | sed "$entity")
