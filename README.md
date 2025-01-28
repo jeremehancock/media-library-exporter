@@ -1,6 +1,10 @@
 # Media Library Exporter (for Plex)
 
-A powerful bash script that allows you to export your Plex Media Server library information to CSV files. This tool supports exporting movies, TV shows, and music libraries with detailed metadata.
+A powerful bash script for Linux that allows you to export your Plex Media Server library information to CSV files. This tool supports exporting movies, TV shows, and music libraries with detailed metadata.
+
+## AI Assistance Disclosure
+
+This tool was developed with assistance from AI language models.
 
 ## Features
 
