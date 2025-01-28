@@ -202,6 +202,10 @@ The script includes comprehensive error handling for common issues:
 - Invalid arguments
 - Concurrent execution attempts
 
+## Disclaimer
+
+All code is provided as-is without any warranty.
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
