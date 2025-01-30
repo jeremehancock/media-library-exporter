@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script metadata
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly SCRIPT_NAME=$(basename "$0")
 readonly SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 readonly TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -50,7 +50,7 @@ fi
 check_dependencies() {
     local missing_deps=()
     
-    for cmd in curl sed grep date readlink xmllint; do
+    for cmd in curl sed grep date readlink xmllint bc tee python3 mktemp numfmt kill tr wc; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             missing_deps+=("$cmd")
         fi
@@ -59,7 +59,11 @@ check_dependencies() {
     if ((${#missing_deps[@]} > 0)); then
         log_error "Missing required dependencies: ${missing_deps[*]}"
         log_error "Please install these dependencies and try again."
-        log_error "Note: xmllint is typically provided by the libxml2-utils package"
+        log_error "Note: Required packages:"
+        log_error "  - xmllint: typically provided by libxml2-utils package"
+        log_error "  - bc: basic calculator package"
+        log_error "  - numfmt: typically provided by coreutils package"
+        log_error "  - python3: Python 3 interpreter"
         exit $E_MISSING_DEPS
     fi
 }
@@ -666,6 +670,37 @@ format_duration() {
     fi
 }
 
+clean_csv_file() {
+    local file="$1"
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Use Python with csv module to properly handle CSV formatting
+    python3 -c '
+import csv
+import sys
+
+input_file = sys.argv[1]
+temp_file = sys.argv[2]
+
+with open(input_file, "r", newline="") as infile, open(temp_file, "w", newline="") as outfile:
+    # Read CSV with proper handling of quotes and embedded newlines
+    reader = csv.reader(infile)
+    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL)
+    
+    # Process each row
+    for row in reader:
+        # Clean each field: replace newlines with spaces and strip whitespace
+        cleaned_row = [field.replace("\n", " ").replace("\r", " ").strip() for field in row]
+        # Only write non-empty rows (where at least one field has content)
+        if any(field for field in cleaned_row):
+            writer.writerow(cleaned_row)
+' "$file" "$temp_file"
+
+    # Replace original file with cleaned version
+    mv "$temp_file" "$file"
+}
+
 export_movie_library() {
     local library_id=$1
     local output_file=$2
@@ -782,6 +817,9 @@ export_movie_library() {
     if ! $QUIET; then
         echo -e "\n"
     fi
+    
+    # Clean the CSV file
+    clean_csv_file "$output_file"
 
     # Verify export
     local exported_count
@@ -901,16 +939,19 @@ export_tv_library() {
         echo -e "\n"
     fi
 
+    # Clean the CSV file
+    clean_csv_file "$output_file"
+    
     # Verify export
     local exported_count
     exported_count=$(wc -l < "$output_file")
     ((exported_count--))  # Subtract 1 for header
     
     if [[ $exported_count -eq 0 ]]; then
-        echo -e "${YELLOW}Warning: No TV shows were exported${NC}" >&2
+        echo -e "${YELLOW}Warning: No TV Shows were exported${NC}" >&2
         return 1
     else
-        echo -e "${GREEN}Successfully exported $exported_count TV shows${NC}"
+        echo -e "${GREEN}Successfully exported $exported_count TV Shows${NC}"
     fi
 }
 
@@ -998,6 +1039,9 @@ export_music_library() {
         echo -e "\n"
     fi
 
+    # Clean the CSV file
+    clean_csv_file "$output_file"
+    
     # Verify export
     local exported_count
     exported_count=$(wc -l < "$output_file")

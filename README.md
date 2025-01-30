@@ -8,12 +8,11 @@ This tool was developed with assistance from AI language models.
 
 ## Features
 
-- Export entire Plex libraries or specific sections
+- Export all Plex libraries or specific ones
 - Support for multiple library types:
-  - Movies (title, year, duration)
-  - TV Shows (series title, total episodes, seasons, year)
-  - Music (artist, album, track, track number, disc number, duration)
-- Configurable output formats and directories
+  - Movies
+  - TV
+  - Albums
 - Robust error handling and retry mechanisms
 - Detailed logging system
 - Color-coded console output
@@ -23,14 +22,37 @@ This tool was developed with assistance from AI language models.
 ## Prerequisites
 
 The script requires the following dependencies:
-- curl
-- sed
-- grep
-- date
-- readlink
-- xmllint
 
-Most Linux distributions will have these installed by default.
+### Core Dependencies
+- `curl` - For making HTTP requests to Plex API
+- `sed` - For text processing
+- `grep` - For pattern matching
+- `date` - For timestamp handling
+- `readlink` - For resolving symbolic links
+- `xmllint` - For XML parsing (typically provided by libxml2-utils package)
+- `bc` - For mathematical calculations (basic calculator package)
+- `tee` - For logging output handling
+- `python3` - For CSV processing
+- `mktemp` - For temporary file handling
+- `numfmt` - For number formatting (typically provided by coreutils package)
+- `kill` - For process management
+- `tr` - For character translation
+- `wc` - For counting lines
+
+### Package Installation
+
+On Debian/Ubuntu systems, you can install missing dependencies using:
+```bash
+sudo apt-get update
+sudo apt-get install curl coreutils bc python3 libxml2-utils
+```
+
+On Red Hat/CentOS systems:
+```bash
+sudo yum install curl coreutils bc python3 libxml2
+```
+
+Most Linux distributions will have many of these tools installed by default, but some might need to be installed manually.
 
 ## Installation
 
@@ -167,26 +189,6 @@ Export all libraries:
 Use a different Plex server:
 ```bash
 ./media-library-exporter.sh -t YOUR_TOKEN -u http://plex.local:32400
-```
-
-## Output Format
-
-### Movies CSV Format
-```
-title,year,duration
-"Movie Title",2023,120
-```
-
-### TV Shows CSV Format
-```
-series_title,total_episodes,seasons,year,duration_minutes
-"Show Title",24,2,2023,30
-```
-
-### Music CSV Format
-```
-artist,album,track,track_number,disc_number,duration
-"Artist Name","Album Name","Track Title",1,1,"3:45"
 ```
 
 ## Logs
