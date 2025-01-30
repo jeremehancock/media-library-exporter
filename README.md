@@ -28,6 +28,7 @@ The script requires the following dependencies:
 - grep
 - date
 - readlink
+- xmllint
 
 Most Linux distributions will have these installed by default.
 
@@ -133,16 +134,17 @@ For more detailed instructions, visit the [official Plex support article](https:
 ```
 Options:
   -t TOKEN    Plex authentication token (required)
-  -u URL      Plex server URL (default: http://localhost:32400)
+  -u URL      Plex server URL (default: ${DEFAULT_PLEX_URL})
   -l          List all libraries
   -n NAME     Export specific library by name
   -o FILE     Output file
-  -d DIR      Output directory (default: exports)
+  -d DIR      Output directory (default: ${DEFAULT_OUTPUT_DIR})
   -f          Force overwrite of existing files
   -q          Quiet mode (no stdout output)
   -v          Debug mode (verbose output)
-  -h          Show help message
+  -h          Show this help message
   --version   Show version information
+  --update    Update to the latest version
 ```
 
 ### Examples

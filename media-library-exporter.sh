@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script metadata
-readonly SCRIPT_VERSION="1.0.3"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SCRIPT_NAME=$(basename "$0")
 readonly SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 readonly TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -46,6 +46,23 @@ else
     readonly BLUE=""
     readonly NC=""
 fi
+
+check_dependencies() {
+    local missing_deps=()
+    
+    for cmd in curl sed grep date readlink xmllint; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_deps+=("$cmd")
+        fi
+    done
+    
+    if ((${#missing_deps[@]} > 0)); then
+        log_error "Missing required dependencies: ${missing_deps[*]}"
+        log_error "Please install these dependencies and try again."
+        log_error "Note: xmllint is typically provided by the libxml2-utils package"
+        exit $E_MISSING_DEPS
+    fi
+}
 
 setup_logging() {
     # Save original stdout and stderr
@@ -147,6 +164,21 @@ tear_down_logging() {
     exec 2>&4
 }
 
+parse_xml_attribute() {
+    local xml="$1"
+    local xpath="$2"
+    local attr="$3"
+    
+    echo "$xml" | xmllint --xpath "string($xpath/@$attr)" - 2>/dev/null
+}
+
+parse_xml_count() {
+    local xml="$1"
+    local xpath="$2"
+    
+    echo "$xml" | xmllint --xpath "count($xpath)" - 2>/dev/null
+}
+
 show_help() {
     cat <<EOF
 Usage: $SCRIPT_NAME [options]
@@ -165,6 +197,7 @@ Options:
   -v          Debug mode (verbose output)
   -h          Show this help message
   --version   Show version information
+  --update    Update to the latest version
 
 Examples:
   ./$SCRIPT_NAME -t YOUR_TOKEN -l
@@ -177,25 +210,104 @@ EOF
     exit $E_SUCCESS
 }
 
+check_version() {
+    if ! command -v curl &> /dev/null; then
+        echo -e "${RED}Error: curl is required for version checking${NC}"
+        return 1
+    fi
+
+    local remote_version
+    remote_version=$(curl -s https://raw.githubusercontent.com/jeremehancock/media-library-exporter/refs/heads/main/media-library-exporter.sh | grep "^readonly SCRIPT_VERSION=" | cut -d'"' -f2)
+    
+    if [[ -z "$remote_version" ]]; then
+        echo -e "${RED}Error: Could not fetch remote version${NC}"
+        return 1
+    fi
+
+    # Compare versions (assuming semantic versioning x.y.z format)
+    if [[ "$remote_version" != "$SCRIPT_VERSION" ]]; then
+        local current_parts=( ${SCRIPT_VERSION//./ } )
+        local remote_parts=( ${remote_version//./ } )
+        
+        for i in {0..2}; do
+            if (( ${remote_parts[$i]:-0} > ${current_parts[$i]:-0} )); then
+                echo -e "${RED}Update available: v$SCRIPT_VERSION → v$remote_version${NC}"
+                echo -e "${YELLOW}Run with --update to update to the latest version${NC}"
+                return 0
+            elif (( ${remote_parts[$i]:-0} < ${current_parts[$i]:-0} )); then
+                break
+            fi
+        done
+    fi
+}
+
+update_script() {
+    if ! command -v curl &> /dev/null; then
+        echo -e "${RED}Error: curl is required for updating${NC}"
+        return 1
+    fi
+
+    echo -e "${BLUE}Updating script...${NC}"
+    
+    # Create backups directory if it doesn't exist
+    local backup_dir="${SCRIPT_DIR}/backups"
+    mkdir -p "$backup_dir"
+
+    # Create backup of current script with version number
+    local backup_file="${backup_dir}/${SCRIPT_NAME}.v${SCRIPT_VERSION}.backup"
+    cp "$0" "$backup_file"
+    
+    # Download new version
+    if curl -o "$SCRIPT_NAME" -L https://raw.githubusercontent.com/jeremehancock/media-library-exporter/main/media-library-exporter.sh; then
+        chmod +x "$SCRIPT_NAME"
+        echo -e "${GREEN}Successfully updated script${NC}"
+        echo -e "${BLUE}Previous version backed up to ${GREEN}$backup_file${NC}"
+    else
+        echo -e "${RED}Update failed${NC}"
+        # Restore backup
+        mv "$backup_file" "$SCRIPT_NAME"
+        return 1
+    fi
+}
+
 show_version() {
     echo "Media Library Exporter (for Plex) v${SCRIPT_VERSION}"
+    check_version
     exit $E_SUCCESS
 }
 
-check_dependencies() {
-    local missing_deps=()
+# HTML entity decoder
+decode_html() {
+    local text="$1"
+    local entities=(
+        's/&amp;/\&/g'
+        's/&#39;/'"'"'/g'
+        's/&quot;/"/g'
+        's/&lt;/</g'
+        's/&gt;/>/g'
+        's/&#8216;/'"'"'/g'
+        's/&#8217;/'"'"'/g'
+        's/&#8220;/"/g'
+        's/&#8221;/"/g'
+        's/&#8230;/.../g'
+        's/&ndash;/-/g'
+        's/&mdash;/--/g'
+        's/&nbsp;/ /g'
+        's/&rsquo;/'"'"'/g'
+        's/&lsquo;/'"'"'/g'
+        's/&rdquo;/"/g'
+        's/&ldquo;/"/g'
+        's/&#8211;/-/g'
+        's/&#8212;/--/g'
+        's/&#x27;/'"'"'/g'
+        's/&#179;/³/g'
+        's/&#189;/½/g'
+    )
     
-    for cmd in curl sed grep date readlink; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing_deps+=("$cmd")
-        fi
+    for entity in "${entities[@]}"; do
+        text=$(echo "$text" | sed "$entity")
     done
-    
-    if ((${#missing_deps[@]} > 0)); then
-        log_error "Missing required dependencies: ${missing_deps[*]}"
-        log_error "Please install these dependencies and try again."
-        exit $E_MISSING_DEPS
-    fi
+    echo "$text"
 }
 
 # Lock management
@@ -204,7 +316,6 @@ create_lock() {
         local pid
         pid=$(cat "$LOCK_FILE")
         if kill -0 "$pid" 2>/dev/null; then
-            # Direct output to stderr, bypassing logging system
             echo -e "${RED}Error: Another instance is running with PID $pid${NC}" >&2
             exit $E_LOCK_EXISTS
         else
@@ -220,54 +331,17 @@ remove_lock() {
     rm -f "$LOCK_FILE"
 }
 
-# HTML entity decoder
-decode_html() {
-    local text="$1"
-	local entities=(
-		's/&amp;/\&/g'
-		's/&#39;/'"'"'/g'
-		's/&quot;/"/g'
-		's/&lt;/</g'
-		's/&gt;/>/g'
-		's/&#8216;/'"'"'/g'
-		's/&#8217;/'"'"'/g'
-		's/&#8220;/"/g'
-		's/&#8221;/"/g'
-		's/&#8230;/.../g'
-		's/&ndash;/-/g'
-		's/&mdash;/--/g'
-		's/&nbsp;/ /g'
-		's/&rsquo;/'"'"'/g'
-		's/&lsquo;/'"'"'/g'
-		's/&rdquo;/"/g'
-		's/&ldquo;/"/g'
-		's/&#8211;/-/g'
-		's/&#8212;/--/g'
-		's/&#x27;/'"'"'/g'
-		's/&#179;/³/g'
-		's/&#189;/½/g'
-	)
-    
-    for entity in "${entities[@]}"; do
-        text=$(echo "$text" | sed "$entity")
-    done
-    echo "$text"
-}
-
 make_api_request() {
     local endpoint=$1
+    local progress_to_stderr=${2:-false}
     local retry_count=3
     local retry_delay=5
     local response=""
-    local full_response=""
-    local attempt=1
     local start=0
     local total_size=0
     local page_count=0
-    local header=""
-    local footer=""
     
-    # Check if endpoint already has query parameters
+    # Determine the proper separator for URL parameters
     local separator
     if [[ "$endpoint" == *"?"* ]]; then
         separator="&"
@@ -285,31 +359,38 @@ make_api_request() {
         "${PLEX_URL}${endpoint}${separator}X-Plex-Container-Start=0&X-Plex-Container-Size=0")
     
     if [[ $? -eq 0 ]]; then
-        total_size=$(echo "$size_check" | grep -o 'totalSize="[^"]*"' | head -n1 | cut -d'"' -f2)
+        total_size=$(echo "$size_check" | xmllint --xpath "string(//MediaContainer/@totalSize)" - 2>/dev/null)
         total_size=${total_size:-0}
         
         # Calculate number of pages
         page_count=$(( (total_size + PAGE_SIZE - 1) / PAGE_SIZE ))
         
-        log_debug "Total items: $total_size, Page size: $PAGE_SIZE, Total pages: $page_count"
+        if $DEBUG; then
+            log_debug "Total items: $total_size, Page size: $PAGE_SIZE, Total pages: $page_count"
+        fi
     else
         log_error "Failed to get total size for endpoint: $endpoint"
         return $E_NETWORK_ERROR
     fi
     
-    # Initialize full response with XML header
-    full_response="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MediaContainer>"
+    # Initialize concatenated response with just the opening tag
+    local concatenated_response="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MediaContainer>"
     
     # Fetch data page by page
     while ((start < total_size)); do
-        attempt=1
+        local attempt=1
         while ((attempt <= retry_count)); do
             local current_page=$(( start / PAGE_SIZE + 1 ))
             if ! $QUIET; then
-                printf "\r${BLUE}Fetching page ${GREEN}%d${BLUE}/${GREEN}%d${NC} (${YELLOW}50${BLUE} items per page)" "$current_page" "$page_count"
+                if $progress_to_stderr; then
+                    printf "\r${BLUE}Fetching page ${GREEN}%d${BLUE}/${GREEN}%d${NC} (${YELLOW}%d${BLUE} items per page)" "$current_page" "$page_count" "$PAGE_SIZE" >&2
+                else
+                    printf "\r${BLUE}Fetching page ${GREEN}%d${BLUE}/${GREEN}%d${NC} (${YELLOW}%d${BLUE} items per page)" "$current_page" "$page_count" "$PAGE_SIZE"
+                fi
             fi
             
-            response=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
+            local page_response
+            page_response=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
                 -H "Accept: application/xml" \
                 -H "X-Plex-Client-Identifier: media-library-exporter-${SCRIPT_VERSION}" \
                 -H "X-Plex-Product: Media Library Exporter (for Plex)" \
@@ -317,17 +398,18 @@ make_api_request() {
                 "${PLEX_URL}${endpoint}${separator}X-Plex-Container-Start=$start&X-Plex-Container-Size=$PAGE_SIZE")
             
             if [[ $? -eq 0 ]]; then
-                # Extract content between MediaContainer tags
-                local content
-                content=$(echo "$response" | awk '/<MediaContainer/,/<\/MediaContainer>/' | \
-                         grep -v "<MediaContainer" | grep -v "</MediaContainer>")
+                # Extract just the inner content, excluding MediaContainer tags
+                local inner_content
+                inner_content=$(echo "$page_response" | 
+                    sed -n '/<MediaContainer/,/<\/MediaContainer>/p' |
+                    sed '1d;$d')  # Remove first and last lines (MediaContainer tags)
                 
-                # Append the content to our full response
-                full_response="${full_response}\n${content}"
+                # Append the inner content to our concatenated response
+                concatenated_response="${concatenated_response}\n${inner_content}"
                 break
             fi
             
-            log_warn "API request failed for page $current_page (attempt $attempt/$retry_count). Retrying in ${retry_delay}s..."
+            log_warn "API request failed for page $current_page (attempt $attempt/$retry_count). Retrying in ${retry_delay}s..." >&2
             sleep "$retry_delay"
             ((attempt++))
         done
@@ -338,19 +420,21 @@ make_api_request() {
         fi
         
         start=$((start + PAGE_SIZE))
-        
-        # Add a small delay between requests to avoid overwhelming the server
-        sleep 0.5
+        sleep 0.5  # Small delay between requests
     done
     
-    # Close the MediaContainer tag
-    full_response="${full_response}\n</MediaContainer>"
+    # Close the concatenated response
+    concatenated_response="${concatenated_response}\n</MediaContainer>"
     
     if ! $QUIET; then
-        echo -e "\n${GREEN}Successfully retrieved all pages${NC}"
+        if $progress_to_stderr; then
+            echo -e "\n${GREEN}Successfully retrieved all pages${NC}" >&2
+        else
+            echo -e "\n${GREEN}Successfully retrieved all pages${NC}"
+        fi
     fi
     
-    echo -e "$full_response"
+    echo -e "$concatenated_response"
     return 0
 }
 
@@ -358,39 +442,119 @@ get_libraries() {
     log_info "Retrieving library sections..."
     local response
     response=$(make_api_request "/library/sections")
+    local request_status=$?
     
-    if [[ $? -ne 0 ]]; then
+    if $DEBUG; then
+        log_debug "API request status: $request_status"
+        log_debug "Raw response length: ${#response}"
+        log_debug "Raw response:"
+        log_debug "$response"
+    fi
+    
+    if [[ $request_status -ne 0 ]]; then
         log_error "Failed to retrieve library sections"
         return $E_NETWORK_ERROR
     fi
     
     echo -e "${BLUE}Available libraries:${NC}"
-    echo "$response" | sed "s/<Directory/\n<Directory/g" | grep "<Directory" | \
-    while read -r line; do
-        local title key type
-        title=$(echo "$line" | grep -o 'title="[^"]*"' | cut -d'"' -f2)
-        key=$(echo "$line" | grep -o 'key="[^"]*"' | cut -d'"' -f2)
-        type=$(echo "$line" | grep -o 'type="[^"]*"' | cut -d'"' -f2)
+    
+    # Process the response if it exists
+    if [[ -n "$response" ]]; then
+        # Clean up the XML response - remove progress messages and fix XML structure
+        local cleaned_response
+        cleaned_response=$(echo "$response" | 
+            sed -e '/Fetching page/d' | # Remove progress messages
+            sed -e '/Successfully retrieved/d' | # Remove success messages
+            sed -e 's/<?xml[^>]*?>//g' | # Remove all XML declarations
+            sed -e 's/<MediaContainer>//' | # Remove outer MediaContainer
+            sed -e 's/<\/MediaContainer><\/MediaContainer>/<\/MediaContainer>/' | # Fix nested closing tags
+            sed -e '1i<?xml version="1.0" encoding="UTF-8"?>\n<MediaContainer>' # Add single XML declaration
+        )
         
-        if [[ -n "$title" && -n "$key" ]]; then
-            echo -e "  ${GREEN}$title${NC} (ID: ${BLUE}$key${NC}, Type: ${YELLOW}$type${NC})"
+        if $DEBUG; then
+            log_debug "Cleaned XML response:"
+            log_debug "$cleaned_response"
         fi
-    done
+        
+        # Get the count of Directory elements from cleaned response
+        local count=0
+        count=$(echo "$cleaned_response" | xmllint --xpath "count(//Directory)" - 2>/dev/null || echo 0)
+        
+        if $DEBUG; then
+            log_debug "Found $count libraries"
+            log_debug "Attempting to parse each library..."
+        fi
+        
+        if [[ $count -eq 0 ]]; then
+            if $DEBUG; then
+                log_debug "No libraries found in response."
+            fi
+            log_error "No libraries found in Plex server response"
+            return $E_NETWORK_ERROR
+        fi
+        
+        for ((i=1; i<=count; i++)); do
+            local title key type
+            title=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@title)" - 2>/dev/null || echo "")
+            key=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@key)" - 2>/dev/null || echo "")
+            type=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@type)" - 2>/dev/null || echo "")
+            
+            if $DEBUG; then
+                log_debug "Library $i - Title: '$title', Key: '$key', Type: '$type'"
+            fi
+            
+            if [[ -n "$title" && -n "$key" ]]; then
+                echo -e "  ${GREEN}$title${NC} (ID: ${BLUE}$key${NC}, Type: ${YELLOW}$type${NC})"
+            fi
+        done
+    else
+        log_error "No response received from Plex server"
+        return $E_NETWORK_ERROR
+    fi
 }
 
 get_library_type() {
     local library_id=$1
     local response
     
-    response=$(make_api_request "/library/sections")
+    if $DEBUG; then
+        log_debug "Getting library type for ID: $library_id"
+    fi
+    
+    # Make a direct call to get sections
+    response=$(curl -s -H "X-Plex-Token: $PLEX_TOKEN" \
+        -H "Accept: application/xml" \
+        "${PLEX_URL}/library/sections")
     
     if [[ $? -ne 0 ]]; then
+        log_error "Failed to get library sections when determining type"
         return $E_NETWORK_ERROR
     fi
     
-    echo "$response" | sed "s/<Directory/\n<Directory/g" | \
-        grep "<Directory" | grep "key=\"$library_id\"" | \
-        grep -o 'type="[^"]*"' | cut -d'"' -f2
+    if $DEBUG; then
+        log_debug "Response received, searching for library type..."
+        log_debug "Raw Response (first 500 chars):"
+        log_debug "${response:0:500}"
+    fi
+    
+    # First try xmllint to get the library type
+    local library_type
+    library_type=$(echo "$response" | xmllint --xpath "string(//Directory[@key='$library_id']/@type)" - 2>/dev/null)
+    
+    if [[ -z "$library_type" ]]; then
+        log_error "Could not find type for library ID $library_id"
+        if $DEBUG; then
+            log_debug "Full response:"
+            log_debug "$response"
+        fi
+        return 1
+    fi
+    
+    if $DEBUG; then
+        log_debug "Found library type: $library_type"
+    fi
+    
+    echo "$library_type"
 }
 
 export_library() {
@@ -446,76 +610,84 @@ export_library() {
 export_movie_library() {
     local library_id=$1
     local output_file=$2
-    local total_size=0
-    local current_item=0
     
     echo "title,year,duration" > "$output_file"
     echo -e "${BLUE}Exporting movie library...${NC}"
     
-    # First, get the total size
-    local size_check
-    size_check=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
-        -H "Accept: application/xml" \
-        "${PLEX_URL}/library/sections/$library_id/all?X-Plex-Container-Start=0&X-Plex-Container-Size=0")
+    local response
+    response=$(make_api_request "/library/sections/$library_id/all?type=1" true)
+    local api_status=$?
     
-    if [[ $? -eq 0 ]]; then
-        total_size=$(echo "$size_check" | grep -o 'totalSize="[^"]*"' | head -n1 | cut -d'"' -f2)
-        total_size=${total_size:-0}
-    else
-        echo -e "${RED}Error: Failed to get library size${NC}" >&2
+    if [[ $api_status -ne 0 ]]; then
+        log_error "Failed to retrieve movie library"
         return $E_NETWORK_ERROR
     fi
+
+    # Clean up the XML response
+    local cleaned_response
+    cleaned_response=$(echo "$response" | 
+        sed -e '/Fetching page/d' | # Remove progress messages
+        sed -e '/Successfully retrieved/d' | # Remove success messages
+        sed -e 's/<?xml[^>]*?>//g' | # Remove all XML declarations
+        sed -e 's/<MediaContainer>//' | # Remove outer MediaContainer
+        sed -e 's/<\/MediaContainer><\/MediaContainer>/<\/MediaContainer>/' | # Fix nested closing tags
+        sed -e '1i<?xml version="1.0" encoding="UTF-8"?>\n<MediaContainer>' # Add single XML declaration
+    )
+
+    if $DEBUG; then
+        log_debug "Cleaned movie library XML:"
+        log_debug "$cleaned_response"
+    fi
+
+    # Get total number of movies using xmllint
+    local total_movies=0
+    total_movies=$(echo "$cleaned_response" | xmllint --xpath "count(//Video)" - 2>/dev/null || echo 0)
+    local current=0
     
-    local start=0
-    local page_count=$(( (total_size + PAGE_SIZE - 1) / PAGE_SIZE ))
-    
-    while ((start < total_size)); do
-        local current_page=$(( start / PAGE_SIZE + 1 ))
+    if $DEBUG; then
+        log_debug "Found $total_movies movies in library"
+    fi
+
+    # Process each Video element using xmllint
+    for ((i=1; i<=total_movies; i++)); do
+        ((current++))
         if ! $QUIET; then
-            printf "\r${BLUE}Fetching page ${GREEN}%d${BLUE}/${GREEN}%d${NC} (${YELLOW}50${BLUE} items per page)" "$current_page" "$page_count"
+            printf "\r${BLUE}Processing movie ${GREEN}%d${BLUE}/${GREEN}%d${NC}" "$current" "$total_movies"
         fi
         
-        local response
-        response=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
-            -H "Accept: application/xml" \
-            "${PLEX_URL}/library/sections/$library_id/all?X-Plex-Container-Start=$start&X-Plex-Container-Size=$PAGE_SIZE")
+        local title year duration
+        title=$(echo "$cleaned_response" | xmllint --xpath "string(//Video[$i]/@title)" - 2>/dev/null || echo "")
+        year=$(echo "$cleaned_response" | xmllint --xpath "string(//Video[$i]/@year)" - 2>/dev/null || echo "")
+        duration=$(echo "$cleaned_response" | xmllint --xpath "string(//Video[$i]/@duration)" - 2>/dev/null || echo "")
         
-        if [[ $? -ne 0 ]]; then
-            echo -e "${RED}Error: Failed to retrieve page $current_page${NC}" >&2
-            return $E_NETWORK_ERROR
+        if $DEBUG; then
+            log_debug "Movie $i - Title: '$title', Year: '$year', Duration: '$duration'"
         fi
         
-        # Process each Video element in this page
-        echo "$response" | grep -o '<Video[^>]*>' | while read -r line; do
-            ((current_item++))
-            
-            local title year duration
-            
-            title=$(echo "$line" | grep -o 'title="[^"]*"' | cut -d'"' -f2)
-            year=$(echo "$line" | grep -o 'year="[^"]*"' | cut -d'"' -f2)
-            duration=$(echo "$line" | grep -o 'duration="[^"]*"' | cut -d'"' -f2)
-            
-            # Convert duration from milliseconds to minutes
-            if [[ -n "$duration" ]]; then
-                duration=$(( duration / 60000 ))
-            fi
-            
-            # Default values for missing fields
-            year=${year:-""}
-            duration=${duration:-""}
-            
-            # Decode HTML entities and escape for CSV
+        # Convert duration from milliseconds to minutes
+        if [[ -n "$duration" ]]; then
+            duration=$(( duration / 60000 ))
+        fi
+        
+        # Default values for missing fields
+        year=${year:-""}
+        duration=${duration:-""}
+        
+        # Only write if we have a title
+        if [[ -n "$title" ]]; then
             title=$(decode_html "$title")
             title=$(echo "$title" | sed 's/"/""/g')
-            
             echo "\"$title\",$year,$duration" >> "$output_file"
-        done
-        
-        start=$((start + PAGE_SIZE))
-        sleep 0.5  # Small delay between pages
+            
+            if $DEBUG; then
+                log_debug "Wrote entry: \"$title\",$year,$duration"
+            fi
+        fi
     done
     
-    echo -e "\n${GREEN}Movie export complete${NC}"
+    if ! $QUIET; then
+        echo -e "\n${GREEN}Movie export complete${NC}"
+    fi
     
     # Verify the export
     local exported_count
@@ -525,8 +697,8 @@ export_movie_library() {
     if [[ $exported_count -eq 0 ]]; then
         echo -e "${YELLOW}Warning: No movies were exported${NC}" >&2
         return 1
-    elif [[ $exported_count -lt $total_size ]]; then
-        echo -e "${YELLOW}Warning: Only exported $exported_count out of $total_size movies${NC}" >&2
+    elif [[ $exported_count -lt $total_movies ]]; then
+        echo -e "${YELLOW}Warning: Only exported $exported_count out of $total_movies movies${NC}" >&2
     else
         echo -e "${GREEN}Successfully exported $exported_count movies${NC}"
     fi
@@ -535,79 +707,87 @@ export_movie_library() {
 export_tv_library() {
     local library_id=$1
     local output_file=$2
-    local total_size=0
-    local current_item=0
     
     echo "series_title,total_episodes,seasons,year,duration_minutes" > "$output_file"
     echo -e "${BLUE}Exporting TV library...${NC}"
     
-    # Get total size
-    local size_check
-    size_check=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
-        -H "Accept: application/xml" \
-        "${PLEX_URL}/library/sections/$library_id/all?type=2&X-Plex-Container-Start=0&X-Plex-Container-Size=0")
+    local response
+    response=$(make_api_request "/library/sections/$library_id/all?type=2" true)
     
-    if [[ $? -eq 0 ]]; then
-        total_size=$(echo "$size_check" | grep -o 'totalSize="[^"]*"' | head -n1 | cut -d'"' -f2)
-        total_size=${total_size:-0}
-    else
-        echo -e "${RED}Error: Failed to get library size${NC}" >&2
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to retrieve TV library"
         return $E_NETWORK_ERROR
     fi
     
-    local start=0
-    local page_count=$(( (total_size + PAGE_SIZE - 1) / PAGE_SIZE ))
+    # Clean up the XML response
+    local cleaned_response
+    cleaned_response=$(echo "$response" | 
+        sed -e '/Fetching page/d' | # Remove progress messages
+        sed -e '/Successfully retrieved/d' | # Remove success messages
+        sed -e 's/<?xml[^>]*?>//g' | # Remove all XML declarations
+        sed -e 's/<MediaContainer>//' | # Remove outer MediaContainer
+        sed -e 's/<\/MediaContainer><\/MediaContainer>/<\/MediaContainer>/' | # Fix nested closing tags
+        sed -e '1i<?xml version="1.0" encoding="UTF-8"?>\n<MediaContainer>' # Add single XML declaration
+    )
+
+    if $DEBUG; then
+        log_debug "Cleaned TV library XML:"
+        log_debug "$cleaned_response"
+    fi
     
-    while ((start < total_size)); do
-        local current_page=$(( start / PAGE_SIZE + 1 ))
+    # Get total number of shows using xmllint
+    local total_shows=0
+    total_shows=$(echo "$cleaned_response" | xmllint --xpath "count(//Directory)" - 2>/dev/null || echo 0)
+    local current=0
+    
+    if $DEBUG; then
+        log_debug "Found $total_shows TV shows in library"
+    fi
+    
+    # Process TV shows using xmllint
+    for ((i=1; i<=total_shows; i++)); do
+        ((current++))
         if ! $QUIET; then
-            printf "\r${BLUE}Fetching page ${GREEN}%d${BLUE}/${GREEN}%d${NC} (${YELLOW}50${BLUE} items per page)" "$current_page" "$page_count"
+            printf "\r${BLUE}Processing show ${GREEN}%d${BLUE}/${GREEN}%d${NC}" "$current" "$total_shows"
         fi
         
-        local response
-        response=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
-            -H "Accept: application/xml" \
-            "${PLEX_URL}/library/sections/$library_id/all?type=2&X-Plex-Container-Start=$start&X-Plex-Container-Size=$PAGE_SIZE")
+        local title episodes seasons year duration
         
-        if [[ $? -ne 0 ]]; then
-            echo -e "${RED}Error: Failed to retrieve page $current_page${NC}" >&2
-            return $E_NETWORK_ERROR
+        title=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@title)" - 2>/dev/null || echo "")
+        episodes=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@leafCount)" - 2>/dev/null || echo "0")
+        seasons=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@childCount)" - 2>/dev/null || echo "0")
+        year=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@year)" - 2>/dev/null || echo "")
+        duration=$(echo "$cleaned_response" | xmllint --xpath "string(//Directory[$i]/@duration)" - 2>/dev/null || echo "")
+        
+        if $DEBUG; then
+            log_debug "Show $i - Title: '$title', Episodes: '$episodes', Seasons: '$seasons', Year: '$year', Duration: '$duration'"
         fi
         
-        # Process each Directory element in this page
-        echo "$response" | grep -o '<Directory[^>]*>' | while read -r line; do
-            ((current_item++))
-            
-            local title episodes seasons year duration
-            
-            title=$(echo "$line" | grep -o 'title="[^"]*"' | cut -d'"' -f2)
-            episodes=$(echo "$line" | grep -o 'leafCount="[^"]*"' | cut -d'"' -f2)
-            seasons=$(echo "$line" | grep -o 'childCount="[^"]*"' | cut -d'"' -f2)
-            year=$(echo "$line" | grep -o 'year="[^"]*"' | cut -d'"' -f2)
-            duration=$(echo "$line" | grep -o 'duration="[^"]*"' | cut -d'"' -f2)
-            
-            if [[ -n "$duration" ]]; then
-                duration=$(( duration / 60000 ))
-            fi
-            
-            # Default values for missing fields
-            episodes=${episodes:-"0"}
-            seasons=${seasons:-"0"}
-            year=${year:-""}
-            duration=${duration:-""}
-            
-            # Decode HTML entities and escape for CSV
+        if [[ -n "$duration" ]]; then
+            duration=$(( duration / 60000 ))
+        fi
+        
+        # Default values for missing fields
+        episodes=${episodes:-"0"}
+        seasons=${seasons:-"0"}
+        year=${year:-""}
+        duration=${duration:-""}
+        
+        # Decode HTML entities and escape for CSV
+        if [[ -n "$title" ]]; then
             title=$(decode_html "$title")
             title=$(echo "$title" | sed 's/"/""/g')
-            
             echo "\"$title\",$episodes,$seasons,$year,$duration" >> "$output_file"
-        done
-        
-        start=$((start + PAGE_SIZE))
-        sleep 0.5  # Small delay between pages
+            
+            if $DEBUG; then
+                log_debug "Wrote entry: \"$title\",$episodes,$seasons,$year,$duration"
+            fi
+        fi
     done
     
-    echo -e "\n${GREEN}TV export complete${NC}"
+    if ! $QUIET; then
+        echo -e "\n${GREEN}TV export complete${NC}"
+    fi
     
     # Verify the export
     local exported_count
@@ -617,8 +797,8 @@ export_tv_library() {
     if [[ $exported_count -eq 0 ]]; then
         echo -e "${YELLOW}Warning: No TV shows were exported${NC}" >&2
         return 1
-    elif [[ $exported_count -lt $total_size ]]; then
-        echo -e "${YELLOW}Warning: Only exported $exported_count out of $total_size TV shows${NC}" >&2
+    elif [[ $exported_count -lt $total_shows ]]; then
+        echo -e "${YELLOW}Warning: Only exported $exported_count out of $total_shows TV shows${NC}" >&2
     else
         echo -e "${GREEN}Successfully exported $exported_count TV shows${NC}"
     fi
@@ -627,85 +807,94 @@ export_tv_library() {
 export_music_library() {
     local library_id=$1
     local output_file=$2
-    local total_size=0
-    local current_item=0
     
     echo "artist,album,track,track_number,disc_number,duration" > "$output_file"
     echo -e "${BLUE}Exporting music library...${NC}"
     
-    # Get total size
-    local size_check
-    size_check=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
-        -H "Accept: application/xml" \
-        "${PLEX_URL}/library/sections/$library_id/all?type=10&X-Plex-Container-Start=0&X-Plex-Container-Size=0")
+    local response
+    response=$(make_api_request "/library/sections/$library_id/all?type=10" true)
     
-    if [[ $? -eq 0 ]]; then
-        total_size=$(echo "$size_check" | grep -o 'totalSize="[^"]*"' | head -n1 | cut -d'"' -f2)
-        total_size=${total_size:-0}
-    else
-        echo -e "${RED}Error: Failed to get library size${NC}" >&2
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to retrieve music library"
         return $E_NETWORK_ERROR
     fi
     
-    local start=0
-    local page_count=$(( (total_size + PAGE_SIZE - 1) / PAGE_SIZE ))
+    # Clean up the XML response
+    local cleaned_response
+    cleaned_response=$(echo "$response" | 
+        sed -e '/Fetching page/d' | # Remove progress messages
+        sed -e '/Successfully retrieved/d' | # Remove success messages
+        sed -e 's/<?xml[^>]*?>//g' | # Remove all XML declarations
+        sed -e 's/<MediaContainer>//' | # Remove outer MediaContainer
+        sed -e 's/<\/MediaContainer><\/MediaContainer>/<\/MediaContainer>/' | # Fix nested closing tags
+        sed -e '1i<?xml version="1.0" encoding="UTF-8"?>\n<MediaContainer>' # Add single XML declaration
+    )
+
+    if $DEBUG; then
+        log_debug "Cleaned music library XML:"
+        log_debug "$cleaned_response"
+    fi
     
-    while ((start < total_size)); do
-        local current_page=$(( start / PAGE_SIZE + 1 ))
+    # Get total number of tracks using xmllint
+    local total_tracks=0
+    total_tracks=$(echo "$cleaned_response" | xmllint --xpath "count(//Track)" - 2>/dev/null || echo 0)
+    local current=0
+    
+    if $DEBUG; then
+        log_debug "Found $total_tracks tracks in library"
+    fi
+    
+    # Process tracks using xmllint
+    for ((i=1; i<=total_tracks; i++)); do
+        ((current++))
         if ! $QUIET; then
-            printf "\r${BLUE}Fetching page ${GREEN}%d${BLUE}/${GREEN}%d${NC} (${YELLOW}50${BLUE} items per page)" "$current_page" "$page_count"
+            printf "\r${BLUE}Processing track ${GREEN}%d${BLUE}/${GREEN}%d${NC}" "$current" "$total_tracks"
         fi
         
-        local response
-        response=$(curl -s -f -H "X-Plex-Token: $PLEX_TOKEN" \
-            -H "Accept: application/xml" \
-            "${PLEX_URL}/library/sections/$library_id/all?type=10&X-Plex-Container-Start=$start&X-Plex-Container-Size=$PAGE_SIZE")
+        local artist album track_title track_num disc_num duration
         
-        if [[ $? -ne 0 ]]; then
-            echo -e "${RED}Error: Failed to retrieve page $current_page${NC}" >&2
-            return $E_NETWORK_ERROR
+        artist=$(echo "$cleaned_response" | xmllint --xpath "string(//Track[$i]/@grandparentTitle)" - 2>/dev/null || echo "")
+        album=$(echo "$cleaned_response" | xmllint --xpath "string(//Track[$i]/@parentTitle)" - 2>/dev/null || echo "")
+        track_title=$(echo "$cleaned_response" | xmllint --xpath "string(//Track[$i]/@title)" - 2>/dev/null || echo "")
+        track_num=$(echo "$cleaned_response" | xmllint --xpath "string(//Track[$i]/@index)" - 2>/dev/null || echo "")
+        disc_num=$(echo "$cleaned_response" | xmllint --xpath "string(//Track[$i]/@parentIndex)" - 2>/dev/null || echo "")
+        duration=$(echo "$cleaned_response" | xmllint --xpath "string(//Track[$i]/@duration)" - 2>/dev/null || echo "")
+        
+        if $DEBUG; then
+            log_debug "Track $i - Artist: '$artist', Album: '$album', Title: '$track_title', Track: '$track_num', Disc: '$disc_num', Duration: '$duration'"
         fi
         
-        # Process each Track element in this page
-        echo "$response" | grep -o '<Track[^>]*>' | while read -r line; do
-            ((current_item++))
-            
-            local artist album track track_num disc_num duration
-            
-            artist=$(echo "$line" | grep -o 'grandparentTitle="[^"]*"' | cut -d'"' -f2)
-            album=$(echo "$line" | grep -o 'parentTitle="[^"]*"' | cut -d'"' -f2)
-            track=$(echo "$line" | grep -o 'title="[^"]*"' | cut -d'"' -f2)
-            track_num=$(echo "$line" | grep -o 'index="[^"]*"' | cut -d'"' -f2)
-            disc_num=$(echo "$line" | grep -o 'parentIndex="[^"]*"' | cut -d'"' -f2)
-            duration=$(echo "$line" | grep -o 'duration="[^"]*"' | cut -d'"' -f2)
-            
-            if [[ -n "$duration" ]]; then
-                minutes=$(( duration / 60000 ))
-                seconds=$(( (duration % 60000) / 1000 ))
-                duration="${minutes}:$(printf "%02d" $seconds)"
-            fi
-            
-            # Default values for missing fields
-            track_num=${track_num:-""}
-            disc_num=${disc_num:-""}
-            duration=${duration:-""}
-            
-            # Decode HTML entities and escape for CSV
+        if [[ -n "$duration" ]]; then
+            minutes=$(( duration / 60000 ))
+            seconds=$(( (duration % 60000) / 1000 ))
+            duration="${minutes}:$(printf "%02d" $seconds)"
+        fi
+        
+        # Default values for missing fields
+        track_num=${track_num:-""}
+        disc_num=${disc_num:-""}
+        duration=${duration:-""}
+        
+        # Decode HTML entities and escape for CSV
+        if [[ -n "$track_title" ]]; then
             artist=$(decode_html "$artist")
             album=$(decode_html "$album")
-            track=$(decode_html "$track")
+            track_title=$(decode_html "$track_title")
             artist=$(echo "$artist" | sed 's/"/""/g')
             album=$(echo "$album" | sed 's/"/""/g')
-            track=$(echo "$track" | sed 's/"/""/g')
+            track_title=$(echo "$track_title" | sed 's/"/""/g')
             
-            echo "\"$artist\",\"$album\",\"$track\",$track_num,$disc_num,\"$duration\"" >> "$output_file"
-        done
-        
-        start=$((start + PAGE_SIZE))
-        sleep 0.5  # Small delay between pages
+            echo "\"$artist\",\"$album\",\"$track_title\",$track_num,$disc_num,\"$duration\"" >> "$output_file"
+            
+            if $DEBUG; then
+                log_debug "Wrote entry: \"$artist\",\"$album\",\"$track_title\",$track_num,$disc_num,\"$duration\""
+            fi
+        fi
     done
     
-    echo -e "\n${GREEN}Music export complete${NC}"
+    if ! $QUIET; then
+        echo -e "\n${GREEN}Music export complete${NC}"
+    fi
     
     # Verify the export
     local exported_count
@@ -715,22 +904,24 @@ export_music_library() {
     if [[ $exported_count -eq 0 ]]; then
         echo -e "${YELLOW}Warning: No tracks were exported${NC}" >&2
         return 1
-    elif [[ $exported_count -lt $total_size ]]; then
-        echo -e "${YELLOW}Warning: Only exported $exported_count out of $total_size tracks${NC}" >&2
+    elif [[ $exported_count -lt $total_tracks ]]; then
+        echo -e "${YELLOW}Warning: Only exported $exported_count out of $total_tracks tracks${NC}" >&2
     else
         echo -e "${GREEN}Successfully exported $exported_count tracks${NC}"
     fi
 }
 
 parse_arguments() {
-    
     while getopts ":t:u:ln:o:d:fqvh-:" opt; do
         case $opt in
-            f) FORCE=true ;;  # Make sure this line is present
             -)
                 case "${OPTARG}" in
                     version)
                         show_version
+                        ;;
+                    update)
+                        update_script
+                        exit $E_SUCCESS
                         ;;
                     *)
                         log_error "Invalid option: --${OPTARG}"
@@ -826,13 +1017,9 @@ EOF
 
 main() {
     load_config
-    
     parse_arguments "$@"
-    
     check_dependencies
-    
     setup_logging
-    
     create_lock
     
     # Validate required parameters
@@ -865,16 +1052,17 @@ main() {
     fi
     
     # Export specific library if requested
-    if [[ -n "$LIBRARY_NAME" ]]; then
-        log_info "Exporting library: $LIBRARY_NAME"
-        library_id=$(curl -s -H "X-Plex-Token: $PLEX_TOKEN" \
-            -H "Accept: application/xml" \
-            "$PLEX_URL/library/sections" | \
-            sed "s/<Directory/\n<Directory/g" | \
-            grep "<Directory" | \
-            grep "title=\"$LIBRARY_NAME\"" | \
-            grep -o 'key="[^"]*"' | \
-            cut -d'"' -f2)
+	if [[ -n "$LIBRARY_NAME" ]]; then
+		log_info "Exporting library: $LIBRARY_NAME"
+		
+		# Get the library sections
+		local sections_response
+		sections_response=$(curl -s -H "X-Plex-Token: $PLEX_TOKEN" \
+		    -H "Accept: application/xml" \
+		    "${PLEX_URL}/library/sections")
+		    
+		# First try xmllint to get the library id
+		library_id=$(echo "$sections_response" | xmllint --xpath "string(//Directory[@title='$LIBRARY_NAME']/@key)" - 2>/dev/null)
         
         if [[ -z "$library_id" ]]; then
             log_error "Error: Library '$LIBRARY_NAME' not found"
@@ -885,6 +1073,8 @@ main() {
         # Export all libraries
         log_info "Exporting all libraries..."
         mkdir -p exports
+        
+        local response
         response=$(make_api_request "/library/sections")
         
         if [[ $? -ne 0 ]]; then
@@ -892,16 +1082,27 @@ main() {
             exit $E_NETWORK_ERROR
         fi
         
-        echo "$response" | sed "s/<Directory/\n<Directory/g" | grep "<Directory" | \
-        while IFS= read -r line; do
-            title=$(echo "$line" | grep -o 'title="[^"]*"' | cut -d'"' -f2)
-            key=$(echo "$line" | grep -o 'key="[^"]*"' | cut -d'"' -f2)
+        # Count total libraries for progress
+        local total_libs=0
+        total_libs=$(echo "$response" | grep -c '<Directory ' || true)
+        local current_lib=0
+        
+        while IFS= read -r directory; do
+            ((current_lib++))
+            local title key
+            title=$(echo "$directory" | grep -o 'title="[^"]*"' | head -1 | cut -d'"' -f2)
+            key=$(echo "$directory" | grep -o 'key="[^"]*"' | head -1 | cut -d'"' -f2)
+            
             if [[ -n "$title" && -n "$key" ]]; then
+                echo -e "\n${BLUE}Processing library ${GREEN}$current_lib${BLUE}/${GREEN}$total_libs${NC}: ${YELLOW}$title${NC}"
                 output_file="exports/${title// /-}.csv"
                 export_library "$key" "$output_file"
             fi
-        done
+        done < <(echo "$response" | grep -o '<Directory[^>]*>' || true)
+        
+        echo -e "\n${GREEN}All libraries have been exported${NC}"
     fi
+
 }
 
 # Execute main function with all arguments
