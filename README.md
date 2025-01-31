@@ -1,6 +1,6 @@
 # Deprecated
 
-This project has been replace by [Libretto](https://github.com/jeremehancock/Libretto) which is a `python` version. It is a much more performant tool and all future development will be done there.
+This project has been replaced by [Libretto](https://github.com/jeremehancock/Libretto) which is a `python` version. It is a much more performant tool and all future development will be done there.
 
 # Media Library Exporter (for Plex)
 
