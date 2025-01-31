@@ -1,3 +1,7 @@
+# Deprecated
+
+This project has been replace by [Libretto](https://github.com/jeremehancock/Libretto) which is a `python` version. It is a much more performant tool and all future development will be done there.
+
 # Media Library Exporter (for Plex)
 
 A powerful bash script for Linux that allows you to export your Plex Media Server library information to CSV files. This tool supports exporting movies, TV shows, and music libraries with detailed metadata.
