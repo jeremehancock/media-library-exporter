@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script metadata
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 readonly SCRIPT_NAME=$(basename "$0")
 readonly SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 readonly TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -46,6 +46,10 @@ else
     readonly BLUE=""
     readonly NC=""
 fi
+
+export PYTHONIOENCODING=utf8
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
 
 check_dependencies() {
     local missing_deps=()
@@ -159,30 +163,6 @@ log_debug() {
     fi
 }
 
-tear_down_logging() {
-    if [[ "$ENABLE_LOGGING" == "true" ]]; then
-        exec 5>&- 2>/dev/null || true
-        exec 6>&- 2>/dev/null || true
-    fi
-    exec 1>&3
-    exec 2>&4
-}
-
-parse_xml_attribute() {
-    local xml="$1"
-    local xpath="$2"
-    local attr="$3"
-    
-    echo "$xml" | xmllint --xpath "string($xpath/@$attr)" - 2>/dev/null
-}
-
-parse_xml_count() {
-    local xml="$1"
-    local xpath="$2"
-    
-    echo "$xml" | xmllint --xpath "count($xpath)" - 2>/dev/null
-}
-
 show_help() {
     cat <<EOF
 Usage: $SCRIPT_NAME [options]
@@ -283,37 +263,29 @@ show_version() {
 # HTML entity decoder
 decode_html() {
     local text="$1"
-    awk '
-    BEGIN {
-        entities["&amp;"] = "&"
-        entities["&#39;"] = "'"'"'"
-        entities["&quot;"] = "\""
-        entities["&lt;"] = "<"
-        entities["&gt;"] = ">"
-        entities["&#8216;"] = "'"'"'"
-        entities["&#8217;"] = "'"'"'"
-        entities["&#8220;"] = "\""
-        entities["&#8221;"] = "\""
-        entities["&#8230;"] = "..."
-        entities["&ndash;"] = "-"
-        entities["&mdash;"] = "--"
-        entities["&nbsp;"] = " "
-        entities["&rsquo;"] = "'"'"'"
-        entities["&lsquo;"] = "'"'"'"
-        entities["&rdquo;"] = "\""
-        entities["&ldquo;"] = "\""
-        entities["&#8211;"] = "-"
-        entities["&#8212;"] = "--"
-        entities["&#x27;"] = "'"'"'"
-        entities["&#179;"] = "³"
-        entities["&#189;"] = "½"
-    }
-    {
-        for (entity in entities) {
-            gsub(entity, entities[entity])
-        }
-        print
-    }' <<< "$text"
+    python3 -c '
+import html
+import sys
+
+text = sys.stdin.read()
+# First decode numeric HTML entities
+decoded = html.unescape(text)
+print(decoded)
+' <<< "$text"
+}
+
+# Add a new function for handling UTF-8 encoding
+ensure_utf8() {
+    local text="$1"
+    python3 -c '
+import sys
+import unicodedata
+
+text = sys.stdin.read()
+# Normalize Unicode characters
+normalized = unicodedata.normalize("NFC", text)
+print(normalized)
+' <<< "$text"
 }
 
 # Lock management
@@ -613,33 +585,6 @@ export_library() {
     fi
 }
 
-safe_xml_extract() {
-    local xml="$1"
-    local xpath="$2"
-    echo "$xml" | xmllint --xpath "$xpath" - 2>/dev/null || echo ""
-}
-
-bytes_to_human() {
-    local bytes=$1
-    if [[ -z "$bytes" ]]; then
-        echo ""
-        return
-    fi
-    
-    local sizes=("B" "KB" "MB" "GB" "TB" "PB")
-    local pos=0
-    local calc_size=$bytes
-    
-    while [[ $(echo "$calc_size >= 1024" | bc -l) -eq 1 && ${pos} -lt 5 ]]; do
-        calc_size=$(echo "scale=2; $calc_size / 1024" | bc -l)
-        ((pos++))
-    done
-    
-    # Remove trailing zeros and decimal point if whole number
-    calc_size=$(echo $calc_size | sed '/\./ s/\.\{0,1\}0\{1,\}$//')
-    echo "${calc_size}${sizes[$pos]}"
-}
-
 format_timestamp() {
     local timestamp=$1
     if [[ -z "$timestamp" ]]; then
@@ -670,35 +615,16 @@ format_duration() {
     fi
 }
 
-clean_csv_file() {
-    local file="$1"
-    local temp_file
-    temp_file=$(mktemp)
-    
-    # Use Python with csv module to properly handle CSV formatting
-    python3 -c '
-import csv
-import sys
-
-input_file = sys.argv[1]
-temp_file = sys.argv[2]
-
-with open(input_file, "r", newline="") as infile, open(temp_file, "w", newline="") as outfile:
-    # Read CSV with proper handling of quotes and embedded newlines
-    reader = csv.reader(infile)
-    writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL)
-    
-    # Process each row
-    for row in reader:
-        # Clean each field: replace newlines with spaces and strip whitespace
-        cleaned_row = [field.replace("\n", " ").replace("\r", " ").strip() for field in row]
-        # Only write non-empty rows (where at least one field has content)
-        if any(field for field in cleaned_row):
-            writer.writerow(cleaned_row)
-' "$file" "$temp_file"
-
-    # Replace original file with cleaned version
-    mv "$temp_file" "$file"
+process_text_field() {
+    local text="$1"
+    # First decode HTML entities
+    text=$(decode_html "$text")
+    # Then ensure proper UTF-8 encoding
+    text=$(ensure_utf8 "$text")
+    # Remove extra line breaks and normalize whitespace
+    text=$(echo "$text" | tr '\n' ' ' | tr -s ' ')
+    # Finally escape for CSV
+    echo "$text" | sed 's/"/""/g'
 }
 
 export_movie_library() {
@@ -726,10 +652,8 @@ export_movie_library() {
     # Process the response to extract Video elements
     echo "$response" | xmllint --xpath "//Video" - 2>/dev/null | while IFS= read -r line; do
         if [[ "$line" =~ \<Video ]]; then
-            # Start collecting a new Video element
             video_xml="$line"
         elif [[ "$line" =~ \</Video\> ]]; then
-            # End of Video element, process it
             video_xml="${video_xml}${line}"
             
             ((current_movie++))
@@ -760,27 +684,26 @@ export_movie_library() {
             local video_frame_rate=$(echo "$video_xml" | xmllint --xpath 'string(//Media/@videoFrameRate)' - 2>/dev/null)
             local size=$(echo "$video_xml" | xmllint --xpath 'string(//Media/Part/@size)' - 2>/dev/null)
             
-            # Tags
+            # Tags with improved HTML entity and UTF-8 handling
             local genres=$(echo "$video_xml" | xmllint --xpath "//Genre/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
             local countries=$(echo "$video_xml" | xmllint --xpath "//Country/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
             local directors=$(echo "$video_xml" | xmllint --xpath "//Director/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
             local writers=$(echo "$video_xml" | xmllint --xpath "//Writer/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
             local actors=$(echo "$video_xml" | xmllint --xpath "//Role/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
             
-            #Format rating
-			if [[ -n "$rating" ]]; then
-				rating=$(echo "$rating * 10" | bc)
-				rating=$(echo "$rating" | sed 's/\.0$//')  # Remove trailing .0 if present
-				rating="${rating}%"
-			fi
+            # Format rating
+            if [[ -n "$rating" ]]; then
+                rating=$(echo "$rating * 10" | bc)
+                rating=$(echo "$rating" | sed 's/\.0$//')
+                rating="${rating}%"
+            fi
 
             # Format audience rating
-			if [[ -n "$audience_rating" ]]; then
-				audience_rating=$(echo "$audience_rating * 10" | bc)
-				audience_rating=$(echo "$audience_rating" | sed 's/\.0$//')  # Remove trailing .0 if present
-				audience_rating="${audience_rating}%"
-			fi
-
+            if [[ -n "$audience_rating" ]]; then
+                audience_rating=$(echo "$audience_rating * 10" | bc)
+                audience_rating=$(echo "$audience_rating" | sed 's/\.0$//')
+                audience_rating="${audience_rating}%"
+            fi
 
             # Format values
             if [[ -n "$duration" ]]; then
@@ -796,11 +719,16 @@ export_movie_library() {
                 size=$(numfmt --to=iec-i --suffix=B "$size" 2>/dev/null)
             fi
             
-            # Escape CSV values
-            title=$(echo "${title}" | sed 's/"/""/g')
-            summary=$(echo "${summary}" | sed 's/"/""/g')
-            studio=$(echo "${studio}" | sed 's/"/""/g')
-            tagline=$(echo "${tagline}" | sed 's/"/""/g')
+            # Process text fields with improved handling
+            title=$(process_text_field "$title")
+            summary=$(process_text_field "$summary")
+            studio=$(process_text_field "$studio")
+            tagline=$(process_text_field "$tagline")
+            genres=$(process_text_field "$genres")
+            countries=$(process_text_field "$countries")
+            directors=$(process_text_field "$directors")
+            writers=$(process_text_field "$writers")
+            actors=$(process_text_field "$actors")
             
             # Write to file
             printf "\"%s\",%s,%s,\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n" \
@@ -808,23 +736,17 @@ export_movie_library() {
                 "${originally_available_at:-}" "${added_at:-}" "${updated_at:-}" "${video_resolution:-}" "${audio_channels:-}" "${audio_codec:-}" \
                 "${video_codec:-}" "${container:-}" "${video_frame_rate:-}" "${size:-}" "${genres:-}" "${countries:-}" "${directors:-}" "${writers:-}" "${actors:-}" >> "$output_file"
         else
-            # Continue collecting the current Video element
             video_xml="${video_xml}${line}"
         fi
     done
 
-    # Add newline after progress display
     if ! $QUIET; then
         echo -e "\n"
     fi
-    
-    # Clean the CSV file
-    clean_csv_file "$output_file"
 
-    # Verify export
     local exported_count
     exported_count=$(wc -l < "$output_file")
-    ((exported_count--))  # Subtract 1 for header
+    ((exported_count--))
     
     if [[ $exported_count -eq 0 ]]; then
         echo -e "${YELLOW}Warning: No movies were exported${NC}" >&2
@@ -851,18 +773,14 @@ export_tv_library() {
         return $E_NETWORK_ERROR
     fi
 
-    # Get total count of shows for progress tracking
     local total_shows=0
     total_shows=$(echo "$response" | xmllint --xpath "count(//Directory)" - 2>/dev/null)
     local current_show=0
 
-    # Process the response to extract Directory elements
     echo "$response" | xmllint --xpath "//Directory" - 2>/dev/null | while IFS= read -r line; do
         if [[ "$line" =~ \<Directory ]]; then
-            # Start collecting a new Directory element
             directory_xml="$line"
         elif [[ "$line" =~ \</Directory\> ]]; then
-            # End of Directory element, process it
             directory_xml="${directory_xml}${line}"
             
             ((current_show++))
@@ -870,7 +788,6 @@ export_tv_library() {
                 printf "\r${BLUE}Processing show ${GREEN}%d${BLUE}/${GREEN}%d${NC}" "$current_show" "$total_shows"
             fi
             
-            # Extract all required fields using xmllint
             local title=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@title)' - 2>/dev/null)
             local episodes=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@leafCount)' - 2>/dev/null)
             local seasons=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@childCount)' - 2>/dev/null)
@@ -884,24 +801,20 @@ export_tv_library() {
             local added_at=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@addedAt)' - 2>/dev/null)
             local updated_at=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@updatedAt)' - 2>/dev/null)
 
-            # Get arrays of tags
             local genres=$(echo "$directory_xml" | xmllint --xpath "//Genre/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
             local countries=$(echo "$directory_xml" | xmllint --xpath "//Country/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
             local actors=$(echo "$directory_xml" | xmllint --xpath "//Role/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
 
-            # Format audience rating
-			if [[ -n "$audience_rating" ]]; then
-				audience_rating=$(echo "$audience_rating * 10" | bc)
-				audience_rating=$(echo "$audience_rating" | sed 's/\.0$//')  # Remove trailing .0 if present
-				audience_rating="${audience_rating}%"
-			fi
+            if [[ -n "$audience_rating" ]]; then
+                audience_rating=$(echo "$audience_rating * 10" | bc)
+                audience_rating=$(echo "$audience_rating" | sed 's/\.0$//')
+                audience_rating="${audience_rating}%"
+            fi
 
-            # Format duration if present
             if [[ -n "$duration" ]]; then
                 duration=$(format_duration "$duration")
             fi
 
-            # Format timestamps
             if [[ -n "$added_at" ]]; then
                 added_at=$(format_timestamp "$added_at")
             fi
@@ -909,43 +822,32 @@ export_tv_library() {
                 updated_at=$(format_timestamp "$updated_at")
             fi
 
-            # Default values
             episodes=${episodes:-"0"}
             seasons=${seasons:-"0"}
             
-            # Process text fields
-            title=$(decode_html "$title")
-            summary=$(decode_html "$summary")
-            studio=$(decode_html "$studio")
+            title=$(process_text_field "$title")
+            summary=$(process_text_field "$summary")
+            studio=$(process_text_field "$studio")
+            genres=$(process_text_field "$genres")
+            countries=$(process_text_field "$countries")
+            actors=$(process_text_field "$actors")
             
-            # Escape for CSV
-            title=$(echo "$title" | sed 's/"/""/g')
-            summary=$(echo "$summary" | sed 's/"/""/g')
-            studio=$(echo "$studio" | sed 's/"/""/g')
-            
-            # Write to file
             printf "\"%s\",%s,%s,\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n" \
                 "$title" "$episodes" "$seasons" "${studio:-}" "${content_rating:-}" "${summary:-}" "${audience_rating:-}" \
                 "${year:-}" "${duration:-}" "${originally_available_at:-}" "${added_at:-}" "${updated_at:-}" \
                 "${genres:-}" "${countries:-}" "${actors:-}" >> "$output_file"
         else
-            # Continue collecting the current Directory element
             directory_xml="${directory_xml}${line}"
         fi
     done
 
-    # Add newline after progress display
     if ! $QUIET; then
         echo -e "\n"
     fi
-
-    # Clean the CSV file
-    clean_csv_file "$output_file"
     
-    # Verify export
     local exported_count
     exported_count=$(wc -l < "$output_file")
-    ((exported_count--))  # Subtract 1 for header
+    ((exported_count--))
     
     if [[ $exported_count -eq 0 ]]; then
         echo -e "${YELLOW}Warning: No TV Shows were exported${NC}" >&2
@@ -959,15 +861,7 @@ export_music_library() {
     local library_id=$1
     local output_file=$2
     
-    # First, let's make a test request to see the actual structure
-    if $DEBUG; then
-        local test_response
-        test_response=$(make_api_request "/library/sections/$library_id/all?type=9&X-Plex-Container-Start=0&X-Plex-Container-Size=1" true)
-        log_debug "Sample album XML structure:"
-        log_debug "$test_response"
-    fi
-    
-    # Create header in output file for album data with confirmed available fields
+    # Create header in output file for album data
     echo "artist,album,year,genres,studio,added_at,updated_at" > "$output_file"
     echo -e "${BLUE}Exporting music library albums...${NC}"
     
@@ -997,7 +891,7 @@ export_music_library() {
                 printf "\r${BLUE}Processing album ${GREEN}%d${BLUE}/${GREEN}%d${NC}" "$current_album" "$total_albums"
             fi
             
-            # Extract only the fields that are confirmed to exist
+            # Extract fields
             local artist=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@parentTitle)' - 2>/dev/null)
             local album=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@title)' - 2>/dev/null)
             local year=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@year)' - 2>/dev/null)
@@ -1005,7 +899,7 @@ export_music_library() {
             local added_at=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@addedAt)' - 2>/dev/null)
             local updated_at=$(echo "$directory_xml" | xmllint --xpath 'string(//Directory/@updatedAt)' - 2>/dev/null)
 
-            # Get genre tags
+            # Get genre tags with improved handling
             local genres=$(echo "$directory_xml" | xmllint --xpath "//Genre/@tag" - 2>/dev/null | tr '\n' ',' | sed 's/tag="//g;s/"//g;s/,$//')
 
             # Format timestamps
@@ -1016,15 +910,11 @@ export_music_library() {
                 updated_at=$(format_timestamp "$updated_at")
             fi
 
-            # Process text fields
-            artist=$(decode_html "$artist")
-            album=$(decode_html "$album")
-            studio=$(decode_html "$studio")
-            
-            # Escape for CSV
-            artist=$(echo "$artist" | sed 's/"/""/g')
-            album=$(echo "$album" | sed 's/"/""/g')
-            studio=$(echo "$studio" | sed 's/"/""/g')
+            # Process text fields with improved handling for line breaks
+            artist=$(process_text_field "$artist")
+            album=$(process_text_field "$album")
+            studio=$(process_text_field "$studio")
+            genres=$(process_text_field "$genres")
             
             # Write to file
             printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n" \
@@ -1038,9 +928,6 @@ export_music_library() {
     if ! $QUIET; then
         echo -e "\n"
     fi
-
-    # Clean the CSV file
-    clean_csv_file "$output_file"
     
     # Verify export
     local exported_count
